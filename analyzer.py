@@ -1,14 +1,13 @@
 """
-analyzer.py — 5 pilares Encryptos + detecção de pullback + zonas de entrada/saída
+analyzer.py — 5 pilares Encryptos com colunas corretas
+Trades = coluna Trades Lv do painel (atividade institucional real)
 """
 import logging
-
 log = logging.getLogger(__name__)
 
-RSI_MIN        = 65
-RSI_PULLBACK   = 50   # abaixo disso nos LTFs = pullback
-LSR_MAX        = 1.50
-SCORE_ALERTA   = 4
+RSI_MIN      = 65
+RSI_PULLBACK = 50
+LSR_MAX      = 1.50
 
 
 def safe(val):
@@ -19,27 +18,18 @@ def safe(val):
 
 
 def rsi_status(v):
-    if v is None:   return "⬜"
-    if v >= 70:     return "🟢"
-    if v >= 65:     return "🟡"
-    if v >= 50:     return "🟠"
+    if v is None: return "⬜"
+    if v >= 70:   return "🟢"
+    if v >= 65:   return "🟡"
+    if v >= 50:   return "🟠"
     return "🔴"
 
 
 def exp_status(v):
-    if v is None:   return "⬜"
-    if v >= 50:     return "🟢"
-    if v >= 20:     return "🟡"
-    if v >= 0:      return "🟠"
-    return "🔴"
-
-
-def trades_status(v):
-    """Avalia atividade institucional nos LTFs."""
-    if v is None:   return "⬜"
-    if v >= 5:      return "🔥"
-    if v >= 2:      return "✅"
-    if v >= 1:      return "🟡"
+    if v is None: return "⬜"
+    if v >= 50:   return "🟢"
+    if v >= 10:   return "🟡"
+    if v >= 0:    return "🟠"
     return "🔴"
 
 
@@ -64,11 +54,11 @@ class EncryptosAnalyzer:
             '1m':  safe(a.get('rsi_1m')),
         }
 
-        htf_vals    = [v for k, v in rsi.items() if k in ('1d','4h','1h') and v is not None]
-        ltf_vals    = [v for k, v in rsi.items() if k in ('15m','5m','1m') and v is not None]
-        htf_ok_cnt  = sum(1 for v in htf_vals if v >= RSI_MIN)
-        ltf_ok_cnt  = sum(1 for v in ltf_vals if v >= RSI_MIN)
-        total_ok    = sum(1 for v in rsi.values() if v is not None and v >= RSI_MIN)
+        htf_vals   = [rsi['1d'], rsi['4h'], rsi['1h']]
+        htf_ok_cnt = sum(1 for v in htf_vals if v is not None and v >= RSI_MIN)
+        ltf_vals   = [rsi['15m'], rsi['5m'], rsi['1m']]
+        ltf_ok_cnt = sum(1 for v in ltf_vals if v is not None and v >= RSI_MIN)
+        total_ok   = sum(1 for v in rsi.values() if v is not None and v >= RSI_MIN)
 
         rsi_ok = False
         if total_ok >= 5:
@@ -76,10 +66,10 @@ class EncryptosAnalyzer:
         elif htf_ok_cnt >= 2:
             rsi_ok = True; score += 0.5
 
-        # Detectar fase do ativo
+        # Detectar fase
         htf_forte  = htf_ok_cnt >= 2
-        ltf_fraco  = all(v < RSI_MIN for v in ltf_vals if v is not None) and len(ltf_vals) >= 2
-        ltf_caindo = any(v < RSI_PULLBACK for v in ltf_vals if v is not None)
+        ltf_fraco  = ltf_ok_cnt == 0 and len([v for v in ltf_vals if v is not None]) >= 2
+        ltf_caindo = any(v is not None and v < RSI_PULLBACK for v in ltf_vals)
 
         if htf_forte and ltf_fraco:
             fase = "pullback"
@@ -93,9 +83,9 @@ class EncryptosAnalyzer:
             fase = "neutro"
 
         # ── PILAR 2: LSR ───────────────────────────────────
-        lsr       = safe(a.get('lsr_valor') or a.get('lsr'))
-        lsr_trend = str(a.get('lsr_trend', ''))
-        lsr_caindo = 'down' in lsr_trend.lower() or '↓' in lsr_trend
+        lsr       = safe(a.get('lsr_valor'))
+        lsr_trend = str(a.get('lsr_trend', ''))   # 'up', 'down', 'neutral'
+        lsr_caindo = lsr_trend == 'down'
 
         lsr_ok = False
         if lsr is not None and lsr < LSR_MAX and lsr_caindo:
@@ -103,34 +93,26 @@ class EncryptosAnalyzer:
         elif lsr is not None and lsr < LSR_MAX:
             lsr_ok = True; score += 0.5
 
-        # Interpretar LSR
         if lsr is not None:
-            if lsr < 0.7:    lsr_label = f"🔥 {lsr:.2f} (shorts extremos)"
-            elif lsr < 1.0:  lsr_label = f"✅ {lsr:.2f} (shorts dominam)"
-            elif lsr < 1.3:  lsr_label = f"🟡 {lsr:.2f} (neutro)"
-            elif lsr < 1.6:  lsr_label = f"🟠 {lsr:.2f} (longs elevados)"
-            else:             lsr_label = f"🔴 {lsr:.2f} (longs extremos)"
-            lsr_seta = "↓" if lsr_caindo else "↑"
-            lsr_label += f" {lsr_seta}"
+            if lsr < 0.7:   lsr_label = f"🔥 {lsr:.2f} (shorts extremos)"
+            elif lsr < 1.0: lsr_label = f"✅ {lsr:.2f} (shorts dominam)"
+            elif lsr < 1.3: lsr_label = f"🟡 {lsr:.2f} (equilibrio)"
+            elif lsr < 1.6: lsr_label = f"🟠 {lsr:.2f} (longs elevados)"
+            else:            lsr_label = f"🔴 {lsr:.2f} (longs extremos)"
+            lsr_label += " ↓" if lsr_caindo else " ↑"
         else:
-            lsr_label = "N/D"
+            lsr_label = "⬜ N/D"
 
         # ── PILAR 3: OI ────────────────────────────────────
         oi_trend = str(a.get('oi_trend', ''))
-        oi_ok    = 'up' in oi_trend.lower() or '↑' in oi_trend
-        oi_valor = safe(a.get('oi_valor'))
+        oi_ok    = oi_trend == 'up'
+        oi_valor = str(a.get('oi_valor', ''))
 
         if oi_ok:
             score += 1
-            oi_label = f"📈 Subindo"
+            oi_label = f"📈 Subindo ({oi_valor})" if oi_valor else "📈 Subindo"
         else:
-            oi_label = f"📉 Caindo/neutro"
-
-        if oi_valor:
-            if oi_valor >= 1_000_000:
-                oi_label += f" ({oi_valor/1_000_000:.1f}M)"
-            elif oi_valor >= 1_000:
-                oi_label += f" ({oi_valor/1_000:.0f}k)"
+            oi_label = f"📉 Neutro/caindo ({oi_valor})" if oi_valor else "📉 Neutro/caindo"
 
         # ── PILAR 4: EXP BTC ───────────────────────────────
         exp = {
@@ -140,119 +122,122 @@ class EncryptosAnalyzer:
             '30m': safe(a.get('exp_30m')),
             '15m': safe(a.get('exp_15m')),
             '5m':  safe(a.get('exp_5m')),
+            '1m':  safe(a.get('exp_1m')),
         }
 
         exp_ok = False
-        if exp['1d'] is not None and exp['1d'] < 0:
-            exp_label = f"🔴 1D:{exp['1d']} (ELIMINADO)"
-        elif exp['1d'] is not None:
-            pos = sum(1 for v in [exp['1d'], exp['4h'], exp['1h']] if v is not None and v > 0)
-            if pos >= 3:
+        e1d = exp['1d']
+        if e1d is not None and e1d < 0:
+            exp_label = f"🔴 1D:{fmt(e1d)} ELIMINADO"
+        elif e1d is not None:
+            htf_pos = sum(1 for v in [exp['1d'], exp['4h'], exp['1h']] if v is not None and v > 0)
+            if htf_pos >= 3:
                 exp_ok = True; score += 1
-                exp_label = f"✅ Positivo HTFs"
-            elif pos >= 2:
+                exp_label = f"✅ HTFs positivos"
+            elif htf_pos >= 2:
                 exp_ok = True; score += 0.5
-                exp_label = f"🟡 Parcial HTFs"
+                exp_label = f"🟡 HTFs parciais"
             else:
-                exp_label = f"🟠 Fraco HTFs"
+                exp_label = f"🟠 HTFs fracos"
         else:
             exp_label = "⬜ N/D"
 
-        # ── PILAR 5: TRADES (atividade institucional) ──────
-        tv_5m = safe(a.get('trades_lv_5m'))
-        tv_1m = safe(a.get('trades_lv_1m'))
+        # ── PILAR 5: TRADES (atividade institucional real) ──
+        # Usa a coluna Trades Lv do painel — tlv_5m e tlv_1m
+        tlv_15m = safe(a.get('tlv_15m'))
+        tlv_5m  = safe(a.get('tlv_5m'))
+        tlv_1m  = safe(a.get('tlv_1m'))
+
+        # Volume bruto de trades (confirmacao de liquidez)
+        vol_5m  = str(a.get('trades_5m', '')).strip()
+        vol_1m  = str(a.get('trades_1m', '')).strip()
 
         trades_ok = False
-        if rsi_ok and exp_ok:
+        tlv_max = max(v for v in [tlv_15m, tlv_5m, tlv_1m] if v is not None) if any(v is not None for v in [tlv_15m, tlv_5m, tlv_1m]) else 0
+
+        if tlv_max >= 3:
             trades_ok = True; score += 1
-
-        # Interpretar atividade institucional nos LTFs
-        if tv_5m is not None and tv_1m is not None:
-            if tv_5m >= 3 or tv_1m >= 3:
-                trades_label = f"🔥 Alta atividade (5m:{tv_5m} 1m:{tv_1m})"
-            elif tv_5m >= 1 or tv_1m >= 1:
-                trades_label = f"✅ Atividade moderada (5m:{tv_5m} 1m:{tv_1m})"
-            else:
-                trades_label = f"🟡 Baixa atividade (5m:{tv_5m} 1m:{tv_1m})"
-        elif rsi_ok and exp_ok:
-            trades_label = "✅ Confirmado por RSI+EXP"
+            trades_label = f"🔥 Alta atividade inst. (15m:{fmt(tlv_15m)} 5m:{fmt(tlv_5m)} 1m:{fmt(tlv_1m)})"
+        elif tlv_max >= 1:
+            trades_ok = True; score += 0.5
+            trades_label = f"✅ Atividade moderada (15m:{fmt(tlv_15m)} 5m:{fmt(tlv_5m)} 1m:{fmt(tlv_1m)})"
         else:
-            trades_label = "⚠️ Sem confirmação"
+            trades_label = f"🟡 Baixa atividade (15m:{fmt(tlv_15m)} 5m:{fmt(tlv_5m)} 1m:{fmt(tlv_1m)})"
 
-        # ── ZONAS DE ENTRADA E SAÍDA ───────────────────────
-        entrada, saida_1, saida_2, stop = calcular_zonas(a, fase, rsi, exp)
+        # Volume de trades bruto
+        vol_label = ""
+        if vol_5m or vol_1m:
+            vol_label = f" | vol 5m:{vol_5m} 1m:{vol_1m}"
+        trades_label += vol_label
 
-        # ── DIAGNÓSTICO DA FASE ────────────────────────────
-        if fase == "pullback":
-            fase_label = "🎯 PULLBACK — aguardar reversão LTFs"
-            fase_emoji = "🎯"
-        elif fase == "tendencia":
-            fase_label = "🚀 TENDÊNCIA — momentum ativo"
-            fase_emoji = "🚀"
-        elif fase == "correcao_forte":
-            fase_label = "⚠️ CORREÇÃO FORTE — aguardar estabilização"
-            fase_emoji = "⚠️"
-        elif fase == "fraco":
-            fase_label = "😴 FRACO — sem setup"
-            fase_emoji = "😴"
-        else:
-            fase_label = "🔄 NEUTRO — em formação"
-            fase_emoji = "🔄"
+        # ── ZONAS OPERACIONAIS ─────────────────────────────
+        entrada, tp1, tp2, stop = calcular_zonas(safe(a.get('price')), fase)
+
+        # ── LABELS DE FASE ─────────────────────────────────
+        fases = {
+            "pullback":       ("🎯", "PULLBACK — aguardar reversão LTFs"),
+            "tendencia":      ("🚀", "TENDÊNCIA — momentum ativo"),
+            "correcao_forte": ("⚠️", "CORREÇÃO FORTE — aguardar estabilização"),
+            "fraco":          ("😴", "FRACO — sem setup"),
+            "neutro":         ("🔄", "NEUTRO — em formação"),
+        }
+        fase_emoji, fase_desc = fases.get(fase, ("🔄", "Em formação"))
 
         return {
             **a,
-            'score':         round(min(score, 5)),
-            'rsi_ok':        rsi_ok,
-            'lsr_ok':        lsr_ok,
-            'oi_ok':         oi_ok,
-            'exp_ok':        exp_ok,
-            'trades_ok':     trades_ok,
-            'fase':          fase,
-            'fase_label':    fase_label,
-            'fase_emoji':    fase_emoji,
-            'lsr_label':     lsr_label,
-            'oi_label':      oi_label,
-            'exp_label':     exp_label,
-            'trades_label':  trades_label,
-            'rsi_dict':      rsi,
-            'exp_dict':      exp,
-            'entrada':       entrada,
-            'saida_1':       saida_1,
-            'saida_2':       saida_2,
-            'stop':          stop,
+            'score':        round(min(score, 5)),
+            'rsi_ok':       rsi_ok,
+            'lsr_ok':       lsr_ok,
+            'oi_ok':        oi_ok,
+            'exp_ok':       exp_ok,
+            'trades_ok':    trades_ok,
+            'fase':         fase,
+            'fase_emoji':   fase_emoji,
+            'fase_label':   f"{fase_emoji} {fase_desc}",
+            'lsr_label':    lsr_label,
+            'oi_label':     oi_label,
+            'exp_label':    exp_label,
+            'trades_label': trades_label,
+            'rsi_dict':     rsi,
+            'exp_dict':     exp,
+            'entrada':      entrada,
+            'tp1':          tp1,
+            'tp2':          tp2,
+            'stop':         stop,
         }
 
 
-def calcular_zonas(a, fase, rsi, exp):
-    """Estima zonas de entrada, alvos e stop baseado na fase."""
-    price = safe(a.get('price'))
+def calcular_zonas(price, fase):
     if not price or price <= 0:
         return None, None, None, None
 
-    # Heurísticas baseadas na metodologia Encryptos
-    # Valores aproximados — refinados com a estrutura do ativo
     if fase == "pullback":
-        # Pullback saudável: entrada no suporte, alvos conservadores
-        entrada = round(price * 0.97, 6)   # 3% abaixo (zona de suporte esperada)
-        saida_1 = round(price * 1.05, 6)   # +5% (TP1)
-        saida_2 = round(price * 1.12, 6)   # +12% (TP2)
-        stop    = round(price * 0.93, 6)   # -7% (SL)
-
+        return (
+            round(price * 0.97, 8),
+            round(price * 1.05, 8),
+            round(price * 1.12, 8),
+            round(price * 0.93, 8),
+        )
     elif fase == "tendencia":
-        # Tendência ativa: entrada agora ou no próximo recuo
-        entrada = round(price * 0.99, 6)   # entrada próxima
-        saida_1 = round(price * 1.08, 6)   # +8%
-        saida_2 = round(price * 1.18, 6)   # +18%
-        stop    = round(price * 0.95, 6)   # -5%
-
+        return (
+            round(price * 0.99, 8),
+            round(price * 1.08, 8),
+            round(price * 1.18, 8),
+            round(price * 0.95, 8),
+        )
     elif fase == "correcao_forte":
-        # Correção: aguardar mais fundo, alvos menores
-        entrada = round(price * 0.92, 6)   # -8% (ainda pode cair)
-        saida_1 = round(price * 1.05, 6)   # +5%
-        saida_2 = round(price * 1.10, 6)   # +10%
-        stop    = round(price * 0.88, 6)   # -12%
+        return (
+            round(price * 0.92, 8),
+            round(price * 1.05, 8),
+            round(price * 1.10, 8),
+            round(price * 0.88, 8),
+        )
+    return None, None, None, None
 
-    else:
-        return None, None, None, None
 
-    return entrada, saida_1, saida_2, stop
+def fmt(v):
+    if v is None: return "--"
+    if isinstance(v, float):
+        if v == int(v): return str(int(v))
+        return f"{v:.2f}"
+    return str(v)
