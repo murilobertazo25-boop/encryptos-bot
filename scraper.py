@@ -1,6 +1,43 @@
 """
 scraper.py — Coleta dados completos do painel Encryptos
-Captura: RSI todos TFs, EXP BTC todos TFs, LSR valor+trend, OI valor+trend, Trades 5m/1m
+Mapeamento de colunas verificado diretamente no DOM do painel.
+
+MAPA DE COLUNAS CONFIRMADO:
+ 0: #
+ 1: Symbol
+ 2: Price
+ 3: Price % 1d
+ 4: Price % 5m
+ 5: Trades 1d        ← volume de trades
+ 6: Trades 15m
+ 7: Trades 5m
+ 8: Trades 1m
+ 9: FR
+10: OI valor (5m)
+11: OI Trend         ← div com class text-green-primary = UP
+12: LSR valor (5m)
+13: LSR Trend        ← SVG path: 8.25=DOWN, 15.75=UP
+14: RSI 1d
+15: RSI 4h
+16: RSI 1h
+17: RSI 30m
+18: RSI 15m
+19: RSI 5m
+20: RSI 1m
+21: EXP BTC 1d
+22: EXP BTC 4h
+23: EXP BTC 1h
+24: EXP BTC 30m
+25: EXP BTC 15m
+26: EXP BTC 5m
+27: EXP BTC 1m
+28: Trades Lv 1d     ← nível institucional
+29: Trades Lv 4h
+30: Trades Lv 1h
+31: Trades Lv 30m
+32: Trades Lv 15m
+33: Trades Lv 5m
+34: Trades Lv 1m
 """
 
 import asyncio
@@ -8,6 +45,7 @@ import logging
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 log = logging.getLogger(__name__)
+
 
 class EncryptosScraper:
     URL_LOGIN     = "https://www.encryptos.app/login"
@@ -30,7 +68,7 @@ class EncryptosScraper:
             page = await context.new_page()
 
             try:
-                log.info("Acessando login Encryptos...")
+                log.info("Fazendo login Encryptos...")
                 await page.goto(self.URL_LOGIN, wait_until="domcontentloaded", timeout=30000)
                 await asyncio.sleep(2)
 
@@ -41,7 +79,6 @@ class EncryptosScraper:
                 await asyncio.sleep(0.5)
                 await page.click('button[type="submit"]')
 
-                log.info("Aguardando dashboard...")
                 await page.wait_for_url("**/dashboard**", timeout=20000)
                 await asyncio.sleep(5)
 
@@ -52,104 +89,98 @@ class EncryptosScraper:
 
                 await asyncio.sleep(2)
 
-                # Capturar headers para mapear colunas dinamicamente
                 dados = await page.evaluate("""
                 () => {
                     const rows = document.querySelectorAll('table tbody tr');
                     if (!rows || rows.length === 0) return [];
 
-                    // Capturar headers
-                    const headerEls = document.querySelectorAll('table thead th');
-                    const headers = Array.from(headerEls).map(h => h.textContent.trim().toLowerCase());
-
                     const ativos = [];
+
+                    const num = (el) => {
+                        if (!el) return null;
+                        const t = el.textContent.trim().replace(',', '.');
+                        // Converter M/k/b para numero
+                        if (t.includes('b')) return parseFloat(t) * 1e9;
+                        if (t.includes('m')) return parseFloat(t) * 1e6;
+                        if (t.includes('k')) return parseFloat(t) * 1e3;
+                        const n = parseFloat(t);
+                        return isNaN(n) ? null : n;
+                    };
+
+                    const txt = (el) => el ? el.textContent.trim() : '';
+
+                    // OI Trend: div com class text-green-primary = UP
+                    const oiTrend = (el) => {
+                        if (!el) return 'neutral';
+                        const div = el.querySelector('div');
+                        if (!div) return 'neutral';
+                        return div.className.includes('green') ? 'up' : 'down';
+                    };
+
+                    // LSR Trend: SVG path d="M19.5 8.25..." = DOWN, "M4.5 15.75..." = UP
+                    const lsrTrend = (el) => {
+                        if (!el) return 'neutral';
+                        const path = el.querySelector('path');
+                        if (!path) return 'neutral';
+                        const d = path.getAttribute('d') || '';
+                        if (d.includes('8.25')) return 'down';
+                        if (d.includes('15.75')) return 'up';
+                        return 'neutral';
+                    };
 
                     rows.forEach((row, idx) => {
                         if (idx >= 20) return;
-                        const cols = row.querySelectorAll('td');
-                        if (cols.length < 10) return;
+                        const c = row.querySelectorAll('td');
+                        if (c.length < 14) return;
 
-                        const txt = (el) => el ? el.textContent.trim() : '';
-                        const num = (el) => {
-                            if (!el) return null;
-                            const t = el.textContent.trim().replace(',', '.');
-                            const n = parseFloat(t);
-                            return isNaN(n) ? null : n;
-                        };
-                        // Pegar seta/trend de um elemento (up/down arrow unicode)
-                        const trend = (el) => {
-                            if (!el) return '';
-                            const t = el.textContent.trim();
-                            if (t.includes('↑') || t.includes('▲') || t.includes('up')) return 'up';
-                            if (t.includes('↓') || t.includes('▼') || t.includes('down')) return 'down';
-                            // Verificar cor (verde=up, vermelho=down)
-                            const style = el.style.color || '';
-                            const cls = el.className || '';
-                            if (style.includes('green') || cls.includes('green') || cls.includes('up')) return 'up';
-                            if (style.includes('red') || cls.includes('red') || cls.includes('down')) return 'down';
-                            return '';
-                        };
+                        const symbol = txt(c[1]);
+                        if (!symbol || symbol.length < 3) return;
 
-                        // Tentar pegar o valor numérico de OI e LSR
-                        const getOIValue = (el) => {
-                            if (!el) return null;
-                            const t = el.textContent.trim().replace(',', '.');
-                            // Converter M/k para numero
-                            if (t.includes('M')) return parseFloat(t) * 1000000;
-                            if (t.includes('k')) return parseFloat(t) * 1000;
-                            return parseFloat(t) || null;
-                        };
+                        ativos.push({
+                            symbol: symbol,
+                            price:  num(c[2]),
 
-                        const ativo = {
-                            symbol:      txt(cols[1]),
-                            price:       num(cols[2]),
+                            // Trades volume (quantidade de operacoes)
+                            trades_1d:   txt(c[5]),
+                            trades_15m:  txt(c[6]),
+                            trades_5m:   txt(c[7]),
+                            trades_1m:   txt(c[8]),
 
-                            // Trades volume
-                            trades_1d:   txt(cols[5]),   // volume 1d
-                            trades_1h:   txt(cols[6]),
-                            trades_30m:  txt(cols[7]),
-                            trades_15m:  txt(cols[8]),
-                            trades_5m:   txt(cols[9]),
-                            trades_1m:   txt(cols[10]),  // ajustar se necessario
+                            // Open Interest
+                            oi_valor:   txt(c[10]),
+                            oi_trend:   oiTrend(c[11]),
 
-                            // OI
-                            oi_valor:    getOIValue(cols[10]),
-                            oi_trend:    trend(cols[11]),
+                            // Long/Short Ratio
+                            lsr_valor:  num(c[12]),
+                            lsr_trend:  lsrTrend(c[13]),
 
-                            // LSR
-                            lsr_valor:   num(cols[13]),
-                            lsr_trend:   trend(cols[14]),
+                            // RSI por timeframe
+                            rsi_1d:   num(c[14]),
+                            rsi_4h:   num(c[15]),
+                            rsi_1h:   num(c[16]),
+                            rsi_30m:  num(c[17]),
+                            rsi_15m:  num(c[18]),
+                            rsi_5m:   num(c[19]),
+                            rsi_1m:   num(c[20]),
 
-                            // RSI (1d, 4h, 1h, 30m, 15m, 5m, 1m)
-                            rsi_1d:      num(cols[17]),
-                            rsi_4h:      num(cols[18]),
-                            rsi_1h:      num(cols[19]),
-                            rsi_30m:     num(cols[20]),
-                            rsi_15m:     num(cols[21]),
-                            rsi_5m:      num(cols[22]),
-                            rsi_1m:      num(cols[23]),
+                            // EXP BTC por timeframe
+                            exp_1d:   num(c[21]),
+                            exp_4h:   num(c[22]),
+                            exp_1h:   num(c[23]),
+                            exp_30m:  num(c[24]),
+                            exp_15m:  num(c[25]),
+                            exp_5m:   num(c[26]),
+                            exp_1m:   num(c[27]),
 
-                            // EXP BTC (1d, 4h, 1h, 30m, 15m, 5m, 1m)
-                            exp_1d:      num(cols[24]),
-                            exp_4h:      num(cols[25]),
-                            exp_1h:      num(cols[26]),
-                            exp_30m:     num(cols[27]),
-                            exp_15m:     num(cols[28]),
-                            exp_5m:      num(cols[29]),
-                            exp_1m:      num(cols[30]),
-
-                            // Trades Lv (atividade institucional)
-                            trades_lv_1d:  num(cols[31]),
-                            trades_lv_1h:  num(cols[32]),
-                            trades_lv_30m: num(cols[33]),
-                            trades_lv_15m: num(cols[34]),
-                            trades_lv_5m:  num(cols[35]),
-                            trades_lv_1m:  num(cols[36]),
-                        };
-
-                        if (ativo.symbol && ativo.symbol.length > 2) {
-                            ativos.push(ativo);
-                        }
+                            // Trades Level (atividade institucional)
+                            tlv_1d:   num(c[28]),
+                            tlv_4h:   num(c[29]),
+                            tlv_1h:   num(c[30]),
+                            tlv_30m:  num(c[31]),
+                            tlv_15m:  num(c[32]),
+                            tlv_5m:   num(c[33]),
+                            tlv_1m:   num(c[34]),
+                        });
                     });
 
                     return ativos;
@@ -158,7 +189,7 @@ class EncryptosScraper:
 
                 log.info(f"Coletados {len(dados)} ativos.")
                 if not dados:
-                    log.warning(f"URL atual: {page.url}")
+                    log.warning(f"Nenhum dado. URL: {page.url}")
                 return dados
 
             except PlaywrightTimeout as e:
