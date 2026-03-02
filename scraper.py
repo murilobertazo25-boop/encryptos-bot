@@ -1,11 +1,10 @@
 """
 scraper.py — Acessa o painel Encryptos e coleta os dados dos ativos.
-Usa Playwright para simular um navegador real.
 """
 
 import asyncio
 import logging
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 log = logging.getLogger(__name__)
 
@@ -17,87 +16,116 @@ class EncryptosScraper:
         self.email    = email
         self.password = password
 
-    async def coletar_dados(self) -> list[dict]:
-        """Faz login, lê o painel e retorna lista de ativos com seus indicadores."""
+    async def coletar_dados(self) -> list:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page    = await browser.new_page()
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            )
+            context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
 
             try:
                 # ── LOGIN ──
-                log.info("Fazendo login no Encryptos...")
-                await page.goto(self.URL_LOGIN, wait_until="networkidle")
-                await page.fill('input[type="email"]',    self.email)
+                log.info("Acessando login Encryptos...")
+                await page.goto(self.URL_LOGIN, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(2)
+
+                # Preencher email
+                await page.wait_for_selector('input[type="email"]', timeout=15000)
+                await page.fill('input[type="email"]', self.email)
+                await asyncio.sleep(0.5)
+
+                # Preencher senha
                 await page.fill('input[type="password"]', self.password)
+                await asyncio.sleep(0.5)
+
+                # Clicar no botão de login
                 await page.click('button[type="submit"]')
-                await page.wait_for_url("**/dashboard**", timeout=15000)
-                log.info("Login realizado com sucesso!")
+                log.info("Login submetido, aguardando redirecionamento...")
 
-                # ── AGUARDAR PAINEL CARREGAR ──
-                await page.wait_for_selector("table tbody tr", timeout=20000)
-                await asyncio.sleep(3)  # aguardar dados em tempo real
+                # Aguardar dashboard carregar
+                await page.wait_for_url("**/dashboard**", timeout=20000)
+                await asyncio.sleep(4)  # aguardar dados em tempo real carregarem
 
-                # ── LER DADOS ──
-                log.info("Coletando dados do painel...")
+                log.info("Dashboard carregado, coletando dados...")
+
+                # Aguardar tabela aparecer
+                try:
+                    await page.wait_for_selector("table tbody tr", timeout=20000)
+                except PlaywrightTimeout:
+                    log.warning("Tabela nao encontrada, tentando coletar mesmo assim...")
+
+                await asyncio.sleep(2)
+
+                # ── COLETAR DADOS ──
                 dados = await page.evaluate("""
                 () => {
                     const rows = document.querySelectorAll('table tbody tr');
+                    if (!rows || rows.length === 0) return [];
+
                     const ativos = [];
-                    
+
                     rows.forEach((row, idx) => {
-                        if (idx >= 20) return; // só os 20 primeiros
+                        if (idx >= 20) return;
                         const cols = row.querySelectorAll('td');
                         if (cols.length < 10) return;
-                        
-                        const getText = (el) => el ? el.textContent.trim() : '';
-                        const getNum  = (el) => {
-                            const t = getText(el).replace(',', '.');
-                            return isNaN(parseFloat(t)) ? null : parseFloat(t);
+
+                        const txt = (el) => el ? el.textContent.trim() : '';
+                        const num = (el) => {
+                            if (!el) return null;
+                            const t = el.textContent.trim().replace(',', '.');
+                            const n = parseFloat(t);
+                            return isNaN(n) ? null : n;
                         };
 
-                        // Mapear colunas conforme a view BertasoEXPbtc
-                        // Ajuste os índices se necessário conforme o layout do painel
                         const ativo = {
-                            symbol:    getText(cols[1]),
-                            price:     getNum(cols[2]),
-                            
-                            // RSI: 1d, 4h, 1h, 30m, 15m, 5m, 1m
-                            rsi_1d:  getNum(cols[17]),
-                            rsi_4h:  getNum(cols[18]),
-                            rsi_1h:  getNum(cols[19]),
-                            rsi_30m: getNum(cols[20]),
-                            rsi_15m: getNum(cols[21]),
-                            rsi_5m:  getNum(cols[22]),
-                            rsi_1m:  getNum(cols[23]),
-                            
-                            // EXP BTC: 1d, 4h, 1h, 30m, 15m, 5m
-                            exp_1d:  getNum(cols[24]),
-                            exp_4h:  getNum(cols[25]),
-                            exp_1h:  getNum(cols[26]),
-                            exp_30m: getNum(cols[27]),
-                            exp_15m: getNum(cols[28]),
-                            exp_5m:  getNum(cols[29]),
-                            
-                            // LSR e OI
-                            lsr:       getNum(cols[13]),
-                            lsr_trend: getText(cols[14]),  // ↑ ou ↓
-                            oi_trend:  getText(cols[11]),  // ↑ ou ↓
+                            symbol:    txt(cols[1]),
+                            rsi_1d:    num(cols[17]),
+                            rsi_4h:    num(cols[18]),
+                            rsi_1h:    num(cols[19]),
+                            rsi_30m:   num(cols[20]),
+                            rsi_15m:   num(cols[21]),
+                            rsi_5m:    num(cols[22]),
+                            rsi_1m:    num(cols[23]),
+                            exp_1d:    num(cols[24]),
+                            exp_4h:    num(cols[25]),
+                            exp_1h:    num(cols[26]),
+                            exp_30m:   num(cols[27]),
+                            exp_15m:   num(cols[28]),
+                            exp_5m:    num(cols[29]),
+                            lsr:       num(cols[13]),
+                            lsr_trend: txt(cols[14]),
+                            oi_trend:  txt(cols[11]),
                         };
-                        
-                        if (ativo.symbol && ativo.symbol !== '') {
+
+                        if (ativo.symbol && ativo.symbol.length > 2) {
                             ativos.push(ativo);
                         }
                     });
-                    
+
                     return ativos;
                 }
                 """)
 
-                log.info(f"Coletados {len(dados)} ativos do painel.")
+                log.info(f"Coletados {len(dados)} ativos.")
+
+                # Se nao coletou nada, logar HTML para debug
+                if not dados:
+                    url_atual = page.url
+                    log.warning(f"Nenhum dado coletado. URL atual: {url_atual}")
+
                 return dados
 
+            except PlaywrightTimeout as e:
+                log.error(f"Timeout no scraper: {e}")
+                return []
             except Exception as e:
                 log.error(f"Erro no scraper: {e}")
                 return []
             finally:
+                await context.close()
                 await browser.close()
